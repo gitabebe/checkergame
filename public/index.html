@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Russian Dama Online</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        :root { --bg: #1a1a1a; --board-dark: #769656; --board-light: #eeeed2; }
+        body { background: var(--bg); display: flex; flex-direction: column; align-items: center; font-family: 'Segoe UI', sans-serif; color: white; margin: 0; height: 100vh; overflow: hidden; }
+        
+        /* Lobby Styles */
+        #lobby { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 100; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        #lobby input { padding: 10px; font-size: 18px; border-radius: 5px; border: none; margin-bottom: 10px; text-align: center; }
+        #lobby button { padding: 10px 20px; font-size: 18px; background: #27ae60; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        
+        /* Game Styles */
+        #game-container { display: none; flex-direction: column; align-items: center; }
+        #board { display: grid; grid-template-columns: repeat(8, 60px); grid-template-rows: repeat(8, 60px); border: 8px solid #3e3e3e; margin-top: 20px; }
+        .cell { width: 60px; height: 60px; display: flex; justify-content: center; align-items: center; position: relative; cursor: pointer; }
+        .dark { background-color: var(--board-dark); }
+        .light { background-color: var(--board-light); }
+        .piece { width: 45px; height: 45px; border-radius: 50%; border: 3px solid rgba(0,0,0,0.3); transition: 0.2s; z-index: 10; display: flex; justify-content: center; align-items: center; }
+        .white { background: #f0f0f0; box-shadow: 0 4px #999; }
+        .black { background: #333; box-shadow: 0 4px #000; }
+        .king::before { content: '★'; color: gold; font-size: 24px; }
+        .selected { transform: scale(1.2); box-shadow: 0 0 10px gold; z-index: 20; }
+        #status { font-size: 24px; margin-top: 20px; font-weight: bold; }
+        #room-display { font-size: 14px; color: #aaa; margin-top: 5px; }
+    </style>
+</head>
+<body>
+
+    <div id="lobby">
+        <h2>Russian Dama Online</h2>
+        <input type="text" id="roomInput" placeholder="Enter Room Name (e.g. 'room1')" />
+        <button onclick="joinGame()">Join Game</button>
+        <p id="lobbyMsg"></p>
+    </div>
+
+    <div id="game-container">
+        <div id="status">Waiting for opponent...</div>
+        <div id="board"></div>
+        <div id="room-display"></div>
+    </div>
+
+    <script>
+        const socket = io();
+        let board = [];
+        let turn = 1; // 1: White, 2: Black
+        let myColor = 0; // Assigned by server
+        let roomId = "";
+        let selected = null;
+        let mustContinueJump = null;
+
+        // --- Socket Logic ---
+        function joinGame() {
+            roomId = document.getElementById('roomInput').value;
+            if (!roomId) return alert("Enter a room name!");
+            socket.emit('joinGame', roomId);
+        }
+
+        socket.on('init', (data) => {
+            myColor = data.color;
+            document.getElementById('lobby').style.display = 'none';
+            document.getElementById('game-container').style.display = 'flex';
+            document.getElementById('room-display').innerText = `Room: ${roomId} | You are ${myColor === 1 ? 'WHITE' : 'BLACK'}`;
+            initBoard();
+            updateStatus();
+        });
+
+        socket.on('startGame', () => {
+            updateStatus();
+        });
+
+        socket.on('full', () => {
+            alert("Room is full!");
+            location.reload();
+        });
+
+        socket.on('opponentMove', (moveData) => {
+            // Replicate opponent's move locally
+            executeMove(moveData.r1, moveData.c1, moveData.r2, moveData.c2, moveData.jump, false); // false = don't emit back
+            render();
+        });
+
+        // --- Game Logic ---
+        function updateStatus() {
+            const sEl = document.getElementById('status');
+            if (turn === myColor) sEl.innerText = "YOUR TURN";
+            else sEl.innerText = "Opponent's Turn";
+            sEl.style.color = turn === myColor ? "#2ecc71" : "#e74c3c";
+        }
+
+        function initBoard() {
+            const boardEl = document.getElementById('board');
+            boardEl.innerHTML = '';
+            for (let r = 0; r < 8; r++) {
+                board[r] = [];
+                for (let c = 0; c < 8; c++) {
+                    let type = 0;
+                    if ((r + c) % 2 !== 0) {
+                        if (r < 3) type = 2;
+                        else if (r > 4) type = 1;
+                    }
+                    board[r][c] = { type, king: false };
+                    
+                    const cell = document.createElement('div');
+                    cell.className = `cell ${(r + c) % 2 === 0 ? 'light' : 'dark'}`;
+                    cell.dataset.r = r; cell.dataset.c = c;
+                    cell.onclick = () => handleInput(r, c);
+                    boardEl.appendChild(cell);
+                }
+            }
+            render();
+        }
+
+        function handleInput(r, c) {
+            if (turn !== myColor) return; // Not your turn
+
+            const piece = board[r][c];
+
+            // 1. Must continue multi-jump?
+            if (mustContinueJump) {
+                if (r === mustContinueJump.r && c === mustContinueJump.c) selected = { r, c };
+                else if (selected) {
+                    const jumps = getCaptures(selected.r, selected.c);
+                    const move = jumps.find(j => j.r === r && j.c === c);
+                    if (move) attemptMove(selected.r, selected.c, r, c, move);
+                }
+                render(); return;
+            }
+
+            // 2. Select
+            if (piece.type === myColor) {
+                selected = { r, c };
+                render();
+            } 
+            // 3. Move
+            else if (selected && piece.type === 0) {
+                const jumps = getCaptures(selected.r, selected.c);
+                const validJump = jumps.find(j => j.r === r && j.c === c);
+                
+                // Mandatory capture check
+                const allJumps = getAllGlobalCaptures(myColor);
+                
+                if (validJump) {
+                    attemptMove(selected.r, selected.c, r, c, validJump);
+                } else if (allJumps.length === 0) {
+                    // Normal move (only if no captures available anywhere)
+                    if (isValidNormalMove(selected.r, selected.c, r, c)) {
+                        attemptMove(selected.r, selected.c, r, c, null);
+                    }
+                }
+            }
+        }
+
+        function attemptMove(r1, c1, r2, c2, jump) {
+            // Execute locally
+            executeMove(r1, c1, r2, c2, jump, true);
+        }
+
+        function executeMove(r1, c1, r2, c2, jump, isMyMove) {
+            const p = board[r1][c1];
+            board[r2][c2] = { ...p };
+            board[r1][c1] = { type: 0, king: false };
+
+            if (jump) board[jump.captured.r][jump.captured.c] = { type: 0, king: false };
+
+            // Promotion
+            if (!board[r2][c2].king && (board[r2][c2].type === 1 ? r2 === 0 : r2 === 7)) {
+                board[r2][c2].king = true;
+            }
+
+            // Check multi-jump
+            let moreJumps = false;
+            if (jump) {
+                const subsequentJumps = getCaptures(r2, c2);
+                if (subsequentJumps.length > 0) {
+                    moreJumps = true;
+                    if (isMyMove) {
+                        mustContinueJump = { r: r2, c: c2 };
+                        selected = { r: r2, c: c2 };
+                    }
+                }
+            }
+
+            // Send to server if it was my action
+            if (isMyMove) {
+                socket.emit('makeMove', {
+                    roomId,
+                    moveData: { r1, c1, r2, c2, jump }
+                });
+            }
+
+            // End turn logic
+            if (!moreJumps) {
+                mustContinueJump = null;
+                selected = null;
+                turn = turn === 1 ? 2 : 1;
+                updateStatus();
+            }
+            render();
+        }
+
+        // --- Helper Logic (Same as before) ---
+        function isValidNormalMove(r1, c1, r2, c2) {
+            const p = board[r1][c1];
+            const dr = r2 - r1, dc = Math.abs(c2 - c1);
+            if (p.king) {
+                if (Math.abs(dr) !== dc) return false;
+                const stepR = Math.sign(dr), stepC = Math.sign(c2-c1);
+                for(let i=1; i<Math.abs(dr); i++) {
+                    if (board[r1 + i*stepR][c1 + i*stepC].type !== 0) return false;
+                }
+                return true;
+            }
+            return dc === 1 && (p.type === 1 ? dr === -1 : dr === 1);
+        }
+
+        function getCaptures(r, c) {
+            /* (Simplified capture logic for brevity - same as previous full version) */
+            const p = board[r][c];
+            let jumps = [];
+            const dirs = [[1,1], [1,-1], [-1,1], [-1,-1]];
+            if (!p.king) {
+                dirs.forEach(([dr, dc]) => {
+                    let nR = r+dr*2, nC = c+dc*2;
+                    if (nR >= 0 && nR < 8 && nC >= 0 && nC < 8) {
+                        if (board[nR][nC].type === 0 && board[r+dr][c+dc].type !== 0 && board[r+dr][c+dc].type !== p.type)
+                            jumps.push({ r: nR, c: nC, captured: { r: r+dr, c: c+dc } });
+                    }
+                });
+            } else {
+                dirs.forEach(([dr, dc]) => {
+                    let found = null;
+                    for(let i=1; i<8; i++) {
+                        let tr = r+dr*i, tc = c+dc*i;
+                        if (tr<0||tr>7||tc<0||tc>7) break;
+                        let target = board[tr][tc];
+                        if (!found) {
+                            if (target.type === p.type) break;
+                            if (target.type !== 0) found = {r:tr, c:tc};
+                        } else {
+                            if (target.type !== 0) break;
+                            jumps.push({r:tr, c:tc, captured: found});
+                        }
+                    }
+                });
+            }
+            return jumps;
+        }
+        
+        function getAllGlobalCaptures(player) {
+            let list = [];
+            for(let r=0; r<8; r++) for(let c=0; c<8; c++) {
+                if(board[r][c].type === player && getCaptures(r,c).length > 0) list.push(true);
+            }
+            return list;
+        }
+
+        function render() {
+            const cells = document.querySelectorAll('.cell');
+            cells.forEach(c => {
+                c.innerHTML = '';
+                const r = c.dataset.r, col = c.dataset.c;
+                const p = board[r][col];
+                if (p.type !== 0) {
+                    const d = document.createElement('div');
+                    d.className = `piece ${p.type===1?'white':'black'} ${p.king?'king':''} ${selected?.r==r && selected?.c==col ? 'selected':''}`;
+                    c.appendChild(d);
+                }
+            });
+        }
+    </script>
+</body>
+</html>
