@@ -5,43 +5,39 @@ const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, { cors: { origin: "*" } });
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-let rooms = {}; // Store active games
+let rooms = {}; 
 
 io.on('connection', (socket) => {
-    console.log('User connected:', socket.id);
-
     socket.on('joinGame', (roomId) => {
+        socket.join(roomId);
         const room = io.sockets.adapter.rooms.get(roomId);
         const clientCount = room ? room.size : 0;
 
-        if (clientCount === 0) {
-            socket.join(roomId);
-            rooms[roomId] = { turn: 1 }; // 1 = White
-            socket.emit('init', { color: 1 }); // Player 1 is White
-        } else if (clientCount === 1) {
-            socket.join(roomId);
-            socket.emit('init', { color: 2 }); // Player 2 is Black
-            io.to(roomId).emit('startGame', true); // Start game
+        if (clientCount === 1) {
+            rooms[roomId] = { turn: 1 }; // White starts
+            socket.emit('init', { color: 1 });
         } else {
-            socket.emit('full', true);
+            socket.emit('init', { color: 2 });
+            io.to(roomId).emit('startGame', { turn: 1 });
         }
     });
 
     socket.on('makeMove', ({ roomId, moveData }) => {
-        // Broadcast move to the other player in the room
-        socket.to(roomId).emit('opponentMove', moveData);
-    });
-
-    socket.on('disconnect', () => {
-        console.log('User disconnected');
-        // Optional: Handle cleanup if needed
+        // Update turn on server
+        if (rooms[roomId]) {
+            rooms[roomId].turn = moveData.nextTurn;
+            // Send move AND the new turn to everyone in the room
+            io.to(roomId).emit('opponentMove', {
+                moveData: moveData,
+                nextTurn: moveData.nextTurn
+            });
+        }
     });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
+server.listen(PORT, () => console.log(`Server on port ${PORT}`));
