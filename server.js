@@ -5,11 +5,11 @@ const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server);
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-let rooms = {}; 
+let rooms = {};
 
 io.on('connection', (socket) => {
     socket.on('joinGame', (roomId) => {
@@ -18,7 +18,7 @@ io.on('connection', (socket) => {
         const clientCount = room ? room.size : 0;
 
         if (clientCount === 1) {
-            rooms[roomId] = { turn: 1 }; // White starts
+            rooms[roomId] = { turn: 1 };
             socket.emit('init', { color: 1 });
         } else {
             socket.emit('init', { color: 2 });
@@ -26,12 +26,12 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('makeMove', ({ roomId, moveData }) => {
-        // Update turn on server
+    socket.on('makeMove', (data) => {
+        const { roomId, moveData } = data;
         if (rooms[roomId]) {
             rooms[roomId].turn = moveData.nextTurn;
-            // Send move AND the new turn to everyone in the room
-            io.to(roomId).emit('opponentMove', {
+            // Broadcast to everyone in the room (including sender)
+            io.to(roomId).emit('syncMove', {
                 moveData: moveData,
                 nextTurn: moveData.nextTurn
             });
@@ -40,4 +40,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server on port ${PORT}`));
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
