@@ -22,6 +22,7 @@ io.on('connection', (socket) => {
             socket.emit('init', { color: 1 });
         } else {
             socket.emit('init', { color: 2 });
+            // Start game with White (1) moving first
             io.to(roomId).emit('startGame', { turn: 1 });
         }
     });
@@ -30,7 +31,7 @@ io.on('connection', (socket) => {
         const { roomId, moveData } = data;
         if (rooms[roomId]) {
             rooms[roomId].turn = moveData.nextTurn;
-            // Broadcast to everyone in the room (including sender)
+            // Broadcast to EVERYONE in the room including the sender
             io.to(roomId).emit('syncMove', {
                 moveData: moveData,
                 nextTurn: moveData.nextTurn
