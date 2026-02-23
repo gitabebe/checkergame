@@ -1,192 +1,55 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Russian Dama Online</title>
-    <script src="/socket.io/socket.io.js"></script>
-    <style>
-        :root { --bg: #1a1a1a; --board-dark: #769656; --board-light: #eeeed2; }
-        body { background: var(--bg); display: flex; flex-direction: column; align-items: center; font-family: 'Segoe UI', sans-serif; color: white; margin: 0; height: 100vh; overflow: hidden; }
-        
-        /* Lobby Styles */
-        #lobby { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 100; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-        #lobby input { padding: 10px; font-size: 18px; border-radius: 5px; border: none; margin-bottom: 10px; text-align: center; }
-        #lobby button { padding: 10px 20px; font-size: 18px; background: #27ae60; color: white; border: none; border-radius: 5px; cursor: pointer; }
-        
-        /* Game Styles */
-        #game-container { display: none; flex-direction: column; align-items: center; }
-        #board { display: grid; grid-template-columns: repeat(8, 60px); grid-template-rows: repeat(8, 60px); border: 8px solid #3e3e3e; margin-top: 20px; }
-        .cell { width: 60px; height: 60px; display: flex; justify-content: center; align-items: center; position: relative; cursor: pointer; }
-        .dark { background-color: var(--board-dark); }
-        .light { background-color: var(--board-light); }
-        .piece { width: 45px; height: 45px; border-radius: 50%; border: 3px solid rgba(0,0,0,0.3); transition: 0.2s; z-index: 10; display: flex; justify-content: center; align-items: center; }
-        .white { background: #f0f0f0; box-shadow: 0 4px #999; }
-        .black { background: #333; box-shadow: 0 4px #000; }
-        .king::before { content: '★'; color: gold; font-size: 24px; }
-        .selected { transform: scale(1.2); box-shadow: 0 0 10px gold; z-index: 20; }
-        #status { font-size: 24px; margin-top: 20px; font-weight: bold; }
-        #room-display { font-size: 14px; color: #aaa; margin-top: 5px; }
-    </style>
-</head>
-<body>
+// --- Updated Socket Handlers ---
+socket.on('opponentMove', (data) => {
+    const m = data.moveData;
+    // Perform the move locally
+    applyMoveToBoard(m.r1, m.c1, m.r2, m.c2, m.jump);
+    // Sync the turn from the server
+    turn = data.nextTurn; 
+    mustContinueJump = null; // Reset jump state for the player who just waited
+    updateStatus();
+    render();
+});
 
-    <div id="lobby">
-        <h2>Russian Dama Online</h2>
-        <input type="text" id="roomInput" placeholder="Enter Room Name (e.g. 'room1')" />
-        <button onclick="joinGame()">Join Game</button>
-        <p id="lobbyMsg"></p>
-    </div>
+// --- Split logic into Apply and Execute ---
+function applyMoveToBoard(r1, c1, r2, c2, jump) {
+    const p = board[r1][c1];
+    board[r2][c2] = { ...p };
+    board[r1][c1] = { type: 0, king: false };
 
-    <div id="game-container">
-        <div id="status">Waiting for opponent...</div>
-        <div id="board"></div>
-        <div id="room-display"></div>
-    </div>
-
-    <script>
-    const socket = io();
-    let board = [];
-    let turn = 1; 
-    let myColor = 0; 
-    let roomId = "";
-    let selected = null;
-    let mustContinueJump = null;
-
-    function joinGame() {
-        roomId = document.getElementById('roomInput').value;
-        if (!roomId) return alert("Enter a room name!");
-        socket.emit('joinGame', roomId);
+    if (jump) {
+        board[jump.captured.r][jump.captured.c] = { type: 0, king: false };
     }
 
-    socket.on('init', (data) => {
-        myColor = data.color;
-        document.getElementById('lobby').style.display = 'none';
-        document.getElementById('game-container').style.display = 'flex';
-        document.getElementById('room-display').innerText = `Room: ${roomId} | You are ${myColor === 1 ? 'WHITE' : 'BLACK'}`;
-        initBoard();
-        updateStatus();
-    });
+    // Promotion
+    if (!board[r2][c2].king && (board[r2][c2].type === 1 ? r2 === 0 : r2 === 7)) {
+        board[r2][c2].king = true;
+    }
+}
 
-    socket.on('startGame', () => {
-        updateStatus();
-        render();
-    });
+function executeMove(r1, c1, r2, c2, jump, isMyMove) {
+    applyMoveToBoard(r1, c1, r2, c2, jump);
 
-    socket.on('opponentMove', (moveData) => {
-        executeMove(moveData.r1, moveData.c1, moveData.r2, moveData.c2, moveData.jump, false);
-    });
-
-    function initBoard() {
-        for (let r = 0; r < 8; r++) {
-            board[r] = [];
-            for (let c = 0; c < 8; c++) {
-                let type = 0;
-                if ((r + c) % 2 !== 0) {
-                    if (r < 3) type = 2; // Black
-                    else if (r > 4) type = 1; // White
-                }
-                board[r][c] = { type, king: false };
-            }
-        }
-        render();
+    let moreJumps = false;
+    if (jump) {
+        const subsequent = getCaptures(r2, c2);
+        if (subsequent.length > 0) moreJumps = true;
     }
 
-    function render() {
-        const boardEl = document.getElementById('board');
-        boardEl.innerHTML = '';
-
-        // Perspective Logic: If I am Black (2), render rows 7 down to 0
-        // If I am White (1), render rows 0 up to 7
-        const rowOrder = myColor === 2 ? [0, 1, 2, 3, 4, 5, 6, 7] : [0, 1, 2, 3, 4, 5, 6, 7];
-        // To actually flip the board visually for Black:
-        if (myColor === 2) {
-            boardEl.style.transform = "rotate(180deg)";
+    if (isMyMove) {
+        if (moreJumps) {
+            mustContinueJump = { r: r2, c: c2 };
+            selected = { r: r2, c: c2 };
+            // Don't change turn yet, just render
+            render();
         } else {
-            boardEl.style.transform = "rotate(0deg)";
-        }
-
-        for (let r = 0; r < 8; r++) {
-            for (let c = 0; c < 8; c++) {
-                const cell = document.createElement('div');
-                cell.className = `cell ${(r + c) % 2 === 0 ? 'light' : 'dark'}`;
-                
-                const p = board[r][c];
-                if (p.type !== 0) {
-                    const d = document.createElement('div');
-                    d.className = `piece ${p.type === 1 ? 'white' : 'black'} ${p.king ? 'king' : ''} ${selected?.r == r && selected?.c == c ? 'selected' : ''}`;
-                    // Un-rotate the piece so the King star isn't upside down
-                    if (myColor === 2) d.style.transform = "rotate(180deg)";
-                    cell.appendChild(d);
-                }
-
-                cell.onclick = () => handleInput(r, c);
-                boardEl.appendChild(cell);
-            }
+            // End of turn
+            const nextTurn = (myColor === 1) ? 2 : 1;
+            socket.emit('makeMove', { 
+                roomId, 
+                moveData: { r1, c1, r2, c2, jump, nextTurn: nextTurn } 
+            });
+            // We don't change local turn yet, we wait for server 'opponentMove' 
+            // to keep both screens perfectly synced.
         }
     }
-
-    function handleInput(r, c) {
-        if (turn !== myColor) return;
-        const piece = board[r][c];
-
-        if (mustContinueJump) {
-            if (r === mustContinueJump.r && c === mustContinueJump.c) selected = { r, c };
-            else if (selected) {
-                const jumps = getCaptures(selected.r, selected.c);
-                const move = jumps.find(j => j.r === r && j.c === c);
-                if (move) executeMove(selected.r, selected.c, r, c, move, true);
-            }
-        } else if (piece.type === myColor) {
-            selected = { r, c };
-        } else if (selected && piece.type === 0) {
-            const jumps = getCaptures(selected.r, selected.c);
-            const jumpMove = jumps.find(j => j.r === r && j.c === c);
-            const globalCaptures = getAllGlobalCaptures(myColor);
-
-            if (jumpMove) {
-                executeMove(selected.r, selected.c, r, c, jumpMove, true);
-            } else if (globalCaptures.length === 0 && isValidNormalMove(selected.r, selected.c, r, c)) {
-                executeMove(selected.r, selected.c, r, c, null, true);
-            }
-        }
-        render();
-    }
-
-    function executeMove(r1, c1, r2, c2, jump, isMyMove) {
-        const p = board[r1][c1];
-        board[r2][c2] = { ...p };
-        board[r1][c1] = { type: 0, king: false };
-
-        if (jump) board[jump.captured.r][jump.captured.c] = { type: 0, king: false };
-
-        if (!board[r2][c2].king && (board[r2][c2].type === 1 ? r2 === 0 : r2 === 7)) {
-            board[r2][c2].king = true;
-        }
-
-        let moreJumps = false;
-        if (jump && getCaptures(r2, c2).length > 0) {
-            moreJumps = true;
-            if (isMyMove) {
-                mustContinueJump = { r: r2, c: c2 };
-                selected = { r: r2, c: c2 };
-            }
-        }
-
-        if (isMyMove) {
-            socket.emit('makeMove', { roomId, moveData: { r1, c1, r2, c2, jump } });
-        }
-
-        if (!moreJumps) {
-            mustContinueJump = null;
-            selected = null;
-            turn = turn === 1 ? 2 : 1;
-            updateStatus();
-        }
-        render();
-    }
-
-    // ... (Keep existing helper functions: isValidNormalMove, getCaptures, getAllGlobalCaptures, updateStatus) ...
-</script>
-
-</body>
-</html>
+}
