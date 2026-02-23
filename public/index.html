@@ -1,55 +1,241 @@
-// --- Updated Socket Handlers ---
-socket.on('opponentMove', (data) => {
-    const m = data.moveData;
-    // Perform the move locally
-    applyMoveToBoard(m.r1, m.c1, m.r2, m.c2, m.jump);
-    // Sync the turn from the server
-    turn = data.nextTurn; 
-    mustContinueJump = null; // Reset jump state for the player who just waited
-    updateStatus();
-    render();
-});
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Russian Dama Online</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        :root { --bg: #1a1a1a; --board-dark: #769656; --board-light: #eeeed2; }
+        body { background: var(--bg); display: flex; flex-direction: column; align-items: center; font-family: 'Segoe UI', sans-serif; color: white; margin: 0; height: 100vh; overflow: hidden; }
+        
+        #lobby { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); z-index: 100; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        #lobby input { padding: 12px; font-size: 18px; border-radius: 5px; border: none; margin-bottom: 15px; text-align: center; width: 250px; }
+        #lobby button { padding: 12px 30px; font-size: 18px; background: #27ae60; color: white; border: none; border-radius: 5px; cursor: pointer; transition: 0.3s; }
+        #lobby button:hover { background: #2ecc71; }
+        
+        #game-container { display: none; flex-direction: column; align-items: center; padding-top: 20px; }
+        #board { display: grid; grid-template-columns: repeat(8, 65px); grid-template-rows: repeat(8, 65px); border: 10px solid #3e3e3e; box-shadow: 0 0 30px rgba(0,0,0,0.5); }
+        .cell { width: 65px; height: 65px; display: flex; justify-content: center; align-items: center; position: relative; cursor: pointer; }
+        .dark { background-color: var(--board-dark); }
+        .light { background-color: var(--board-light); }
+        
+        .piece { width: 50px; height: 50px; border-radius: 50%; border: 4px solid rgba(0,0,0,0.3); z-index: 10; display: flex; justify-content: center; align-items: center; transition: transform 0.2s; }
+        .white { background: #f0f0f0; box-shadow: 0 4px #999; }
+        .black { background: #333; box-shadow: 0 4px #000; }
+        .king::before { content: '★'; color: gold; font-size: 28px; text-shadow: 0 0 3px black; }
+        .selected { transform: scale(1.15); box-shadow: 0 0 15px gold; z-index: 20; }
+        
+        #status { font-size: 28px; margin-bottom: 15px; font-weight: bold; letter-spacing: 1px; }
+        #room-info { font-size: 14px; color: #888; margin-top: 10px; }
+    </style>
+</head>
+<body>
 
-// --- Split logic into Apply and Execute ---
-function applyMoveToBoard(r1, c1, r2, c2, jump) {
-    const p = board[r1][c1];
-    board[r2][c2] = { ...p };
-    board[r1][c1] = { type: 0, king: false };
+    <div id="lobby">
+        <h1 style="color: #2ecc71;">RUSSIAN DAMA</h1>
+        <input type="text" id="roomInput" placeholder="Room Name (e.g. game123)" />
+        <button onclick="joinGame()">JOIN GAME</button>
+    </div>
 
-    if (jump) {
-        board[jump.captured.r][jump.captured.c] = { type: 0, king: false };
-    }
+    <div id="game-container">
+        <div id="status">Waiting for opponent...</div>
+        <div id="board"></div>
+        <div id="room-info"></div>
+    </div>
 
-    // Promotion
-    if (!board[r2][c2].king && (board[r2][c2].type === 1 ? r2 === 0 : r2 === 7)) {
-        board[r2][c2].king = true;
-    }
-}
+    <script>
+        const socket = io();
+        let board = [];
+        let turn = 1; 
+        let myColor = 0; 
+        let roomId = "";
+        let selected = null;
+        let mustContinueJump = null;
 
-function executeMove(r1, c1, r2, c2, jump, isMyMove) {
-    applyMoveToBoard(r1, c1, r2, c2, jump);
-
-    let moreJumps = false;
-    if (jump) {
-        const subsequent = getCaptures(r2, c2);
-        if (subsequent.length > 0) moreJumps = true;
-    }
-
-    if (isMyMove) {
-        if (moreJumps) {
-            mustContinueJump = { r: r2, c: c2 };
-            selected = { r: r2, c: c2 };
-            // Don't change turn yet, just render
-            render();
-        } else {
-            // End of turn
-            const nextTurn = (myColor === 1) ? 2 : 1;
-            socket.emit('makeMove', { 
-                roomId, 
-                moveData: { r1, c1, r2, c2, jump, nextTurn: nextTurn } 
-            });
-            // We don't change local turn yet, we wait for server 'opponentMove' 
-            // to keep both screens perfectly synced.
+        function joinGame() {
+            roomId = document.getElementById('roomInput').value.trim();
+            if (!roomId) return alert("Please enter a room name!");
+            socket.emit('joinGame', roomId);
         }
-    }
-}
+
+        socket.on('init', (data) => {
+            myColor = data.color;
+            document.getElementById('lobby').style.display = 'none';
+            document.getElementById('game-container').style.display = 'flex';
+            document.getElementById('room-info').innerText = `Room: ${roomId} | You: ${myColor === 1 ? 'White' : 'Black'}`;
+            initBoard();
+        });
+
+        socket.on('startGame', (data) => {
+            turn = data.turn;
+            updateStatus();
+            render();
+        });
+
+        socket.on('opponentMove', (data) => {
+            const m = data.moveData;
+            applyMoveToBoard(m.r1, m.c1, m.r2, m.c2, m.jump);
+            turn = data.nextTurn; 
+            mustContinueJump = null;
+            selected = null;
+            updateStatus();
+            render();
+        });
+
+        function initBoard() {
+            board = Array(8).fill().map(() => Array(8).fill(null));
+            for (let r = 0; r < 8; r++) {
+                for (let c = 0; c < 8; c++) {
+                    let type = 0;
+                    if ((r + c) % 2 !== 0) {
+                        if (r < 3) type = 2; // Black
+                        else if (r > 4) type = 1; // White
+                    }
+                    board[r][c] = { type, king: false };
+                }
+            }
+            render();
+        }
+
+        function render() {
+            const boardEl = document.getElementById('board');
+            boardEl.innerHTML = '';
+            boardEl.style.transform = myColor === 2 ? "rotate(180deg)" : "rotate(0deg)";
+
+            for (let r = 0; r < 8; r++) {
+                for (let c = 0; c < 8; c++) {
+                    const cell = document.createElement('div');
+                    cell.className = `cell ${(r + c) % 2 === 0 ? 'light' : 'dark'}`;
+                    const p = board[r][c];
+                    if (p.type !== 0) {
+                        const d = document.createElement('div');
+                        d.className = `piece ${p.type === 1 ? 'white' : 'black'} ${p.king ? 'king' : ''} ${selected?.r == r && selected?.c == c ? 'selected' : ''}`;
+                        if (myColor === 2) d.style.transform = "rotate(180deg)";
+                        cell.appendChild(d);
+                    }
+                    cell.onclick = () => handleInput(r, c);
+                    boardEl.appendChild(cell);
+                }
+            }
+        }
+
+        function handleInput(r, c) {
+            if (turn !== myColor) return;
+            const piece = board[r][c];
+
+            if (mustContinueJump) {
+                if (r === mustContinueJump.r && c === mustContinueJump.c) selected = { r, c };
+                else if (selected) {
+                    const jumps = getCaptures(selected.r, selected.c);
+                    const move = jumps.find(j => j.r === r && j.c === c);
+                    if (move) executeMove(selected.r, selected.c, r, c, move, true);
+                }
+            } else if (piece.type === myColor) {
+                selected = { r, c };
+            } else if (selected && piece.type === 0) {
+                const jumps = getCaptures(selected.r, selected.c);
+                const jumpMove = jumps.find(j => j.r === r && j.c === c);
+                const globalCaptures = getAllGlobalCaptures(myColor);
+
+                if (jumpMove) {
+                    executeMove(selected.r, selected.c, r, c, jumpMove, true);
+                } else if (globalCaptures.length === 0 && isValidNormalMove(selected.r, selected.c, r, c)) {
+                    executeMove(selected.r, selected.c, r, c, null, true);
+                }
+            }
+            render();
+        }
+
+        function applyMoveToBoard(r1, c1, r2, c2, jump) {
+            const p = board[r1][c1];
+            board[r2][c2] = { ...p };
+            board[r1][c1] = { type: 0, king: false };
+            if (jump) board[jump.captured.r][jump.captured.c] = { type: 0, king: false };
+            if (!board[r2][c2].king && (board[r2][c2].type === 1 ? r2 === 0 : r2 === 7)) {
+                board[r2][c2].king = true;
+            }
+        }
+
+        function executeMove(r1, c1, r2, c2, jump, isMyMove) {
+            applyMoveToBoard(r1, c1, r2, c2, jump);
+            let moreJumps = false;
+            if (jump) {
+                const subsequent = getCaptures(r2, c2);
+                if (subsequent.length > 0) moreJumps = true;
+            }
+
+            if (isMyMove) {
+                if (moreJumps) {
+                    mustContinueJump = { r: r2, c: c2 };
+                    selected = { r: r2, c: c2 };
+                    render();
+                } else {
+                    const nextTurn = (myColor === 1) ? 2 : 1;
+                    socket.emit('makeMove', { 
+                        roomId, 
+                        moveData: { r1, c1, r2, c2, jump, nextTurn } 
+                    });
+                }
+            }
+        }
+
+        function updateStatus() {
+            const sEl = document.getElementById('status');
+            sEl.innerText = turn === myColor ? "YOUR TURN" : "OPPONENT'S TURN";
+            sEl.style.color = turn === myColor ? "#2ecc71" : "#e74c3c";
+        }
+
+        function isValidNormalMove(r1, c1, r2, c2) {
+            const p = board[r1][c1];
+            const dr = r2 - r1, dc = Math.abs(c2 - c1);
+            if (p.king) {
+                if (Math.abs(dr) !== dc) return false;
+                const sR = Math.sign(dr), sC = Math.sign(c2-c1);
+                for(let i=1; i<Math.abs(dr); i++) if(board[r1+i*sR][c1+i*sC].type !== 0) return false;
+                return true;
+            }
+            return dc === 1 && (p.type === 1 ? dr === -1 : dr === 1);
+        }
+
+        function getCaptures(r, c) {
+            const p = board[r][c];
+            let jumps = [];
+            const dirs = [[1,1], [1,-1], [-1,1], [-1,-1]];
+            if (!p.king) {
+                dirs.forEach(([dr, dc]) => {
+                    let nR = r+dr*2, nC = c+dc*2;
+                    if (nR>=0 && nR<8 && nC>=0 && nC<8) {
+                        if (board[nR][nC].type === 0 && board[r+dr][c+dc].type !== 0 && board[r+dr][c+dc].type !== p.type)
+                            jumps.push({ r: nR, c: nC, captured: { r: r+dr, c: c+dc } });
+                    }
+                });
+            } else {
+                dirs.forEach(([dr, dc]) => {
+                    let found = null;
+                    for(let i=1; i<8; i++) {
+                        let tr = r+dr*i, tc = c+dc*i;
+                        if (tr<0||tr>7||tc<0||tc>7) break;
+                        let target = board[tr][tc];
+                        if (!found) {
+                            if (target.type === p.type) break;
+                            if (target.type !== 0) found = {r:tr, c:tc};
+                        } else {
+                            if (target.type !== 0) break;
+                            jumps.push({r:tr, c:tc, captured: found});
+                        }
+                    }
+                });
+            }
+            return jumps;
+        }
+
+        function getAllGlobalCaptures(player) {
+            let res = [];
+            for(let r=0; r<8; r++) for(let c=0; c<8; c++) 
+                if(board[r][c].type === player && getCaptures(r,c).length > 0) res.push(true);
+            return res;
+        }
+    </script>
+</body>
+</html>
