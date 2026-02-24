@@ -12,14 +12,18 @@
         #lobby input { padding: 12px; margin-bottom: 10px; width: 200px; border-radius: 5px; border: none; text-align: center; }
         #lobby button { padding: 10px 25px; background: #27ae60; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
         #game-container { display: none; flex-direction: column; align-items: center; margin-top: 20px; }
-        #board { display: grid; grid-template-columns: repeat(8, 60px); grid-template-rows: repeat(8, 60px); border: 8px solid #3e3e3e; }
-        .cell { width: 60px; height: 60px; display: flex; justify-content: center; align-items: center; cursor: pointer; }
+        #board { display: grid; grid-template-columns: repeat(8, 60px); grid-template-rows: repeat(8, 60px); border: 8px solid #3e3e3e; position: relative; }
+        .cell { width: 60px; height: 60px; display: flex; justify-content: center; align-items: center; cursor: pointer; position: relative; }
         .dark { background-color: var(--dark); } .light { background-color: var(--light); }
-        .piece { width: 48px; height: 48px; border-radius: 50%; border: 3px solid rgba(0,0,0,0.3); z-index: 10; display: flex; justify-content: center; align-items: center; }
+        .piece { width: 48px; height: 48px; border-radius: 50%; border: 3px solid rgba(0,0,0,0.3); z-index: 10; display: flex; justify-content: center; align-items: center; transition: all 0.2s; }
         .white { background: #f0f0f0; box-shadow: 0 4px #999; } .black { background: #333; box-shadow: 0 4px #000; }
         .king::before { content: '★'; color: gold; font-size: 24px; text-shadow: 0 0 2px black; }
         .selected { outline: 4px solid gold; transform: scale(1.1); z-index: 20; }
-        #status { font-size: 26px; margin-bottom: 15px; font-weight: bold; }
+        
+        /* New Styles for Highlighting and Alerts */
+        .highlight::after { content: ''; position: absolute; width: 20px; height: 20px; background: rgba(241, 196, 15, 0.7); border-radius: 50%; z-index: 5; pointer-events: none; }
+        #status { font-size: 26px; margin-bottom: 5px; font-weight: bold; text-align: center; }
+        #alert-box { height: 24px; color: #f1c40f; font-weight: bold; margin-bottom: 10px; }
     </style>
 </head>
 <body>
@@ -31,6 +35,7 @@
 
     <div id="game-container">
         <div id="status">Waiting for opponent...</div>
+        <div id="alert-box"></div>
         <div id="board"></div>
         <div id="info" style="margin-top:10px; color:#888;"></div>
     </div>
@@ -38,6 +43,7 @@
     <script>
         const socket = io();
         let board = [], turn = 1, myColor = 0, roomId = "", selected = null, mustContinue = null;
+        let validDestinations = [], gameOver = false;
 
         function join() {
             roomId = document.getElementById('roomInput').value.trim();
@@ -54,31 +60,35 @@
 
         socket.on('startGame', d => { turn = d.turn; updateUI(); });
 
-        // THE SOURCE OF TRUTH: Board only updates here
+        socket.on('opponentDisconnected', () => {
+            gameOver = true;
+            document.getElementById('status').innerText = "OPPONENT DISCONNECTED. YOU WIN!";
+            document.getElementById('status').style.color = "#2ecc71";
+            document.getElementById('alert-box').innerText = "";
+        });
+
         socket.on('syncMove', d => {
+            if (gameOver) return;
             const m = d.moveData;
             const p = board[m.r1][m.c1];
             
-            // Move piece
             board[m.r2][m.c2] = {...p};
             board[m.r1][m.c1] = {type:0, king:false};
             
-            // Remove captured piece
-            if (m.jump) {
-                board[m.jump.cap.r][m.jump.cap.c] = {type:0, king:false};
-            }
+            if (m.jump) board[m.jump.cap.r][m.jump.cap.c] = {type:0, king:false};
 
-            // King Promotion
             if (!board[m.r2][m.c2].king && (board[m.r2][m.c2].type === 1 ? m.r2 === 0 : m.r2 === 7)) {
                 board[m.r2][m.c2].king = true;
             }
 
             turn = d.nextTurn;
             selected = null;
-            // Reset jump lock if it's the other player's turn now
+            validDestinations = [];
+            
             if (turn !== myColor) mustContinue = null;
             
-            updateUI();
+            checkWin(); // Check if the next player has any moves left
+            if (!gameOver) updateUI();
         });
 
         function initBoard() {
@@ -99,6 +109,12 @@
                 for (let c=0; c<8; c++) {
                     const cell = document.createElement('div');
                     cell.className = `cell ${(r+c)%2===0?'light':'dark'}`;
+                    
+                    // Add Highlight if it's a valid destination
+                    if (validDestinations.some(v => v.r === r && v.c === c)) {
+                        cell.classList.add('highlight');
+                    }
+
                     const p = board[r][c];
                     if (p.type !== 0) {
                         const d = document.createElement('div');
@@ -113,53 +129,88 @@
         }
 
         function handleClick(r, c) {
-            if (turn !== myColor) return;
+            if (turn !== myColor || gameOver) return;
             const p = board[r][c];
 
             if (mustContinue) {
                 if (r === mustContinue.r && c === mustContinue.c) {
                     selected = {r, c};
-                } else if (selected) {
+                    calculateValidMoves();
+                } else if (selected && validDestinations.some(v => v.r === r && v.c === c)) {
                     processMove(r, c);
                 }
             } else if (p.type === myColor) {
                 selected = {r, c};
-            } else if (selected && p.type === 0) {
+                calculateValidMoves();
+            } else if (selected && p.type === 0 && validDestinations.some(v => v.r === r && v.c === c)) {
                 processMove(r, c);
             }
             render();
         }
 
+        function calculateValidMoves() {
+            validDestinations = [];
+            if (!selected) return;
+
+            const jumps = getJumps(selected.r, selected.c);
+            const globals = getGlobalJumps(myColor);
+
+            if (mustContinue) {
+                validDestinations = jumps.map(j => ({r: j.r, c: j.c}));
+            } else if (globals.length > 0) {
+                // If jumps exist globally, this specific piece can only move if it has jumps
+                validDestinations = jumps.map(j => ({r: j.r, c: j.c}));
+            } else {
+                for (let r = 0; r < 8; r++) {
+                    for (let c = 0; c < 8; c++) {
+                        if (board[r][c].type === 0 && isValidNormal(selected.r, selected.c, r, c)) {
+                            validDestinations.push({r, c});
+                        }
+                    }
+                }
+            }
+        }
+
         function processMove(r, c) {
             const jumps = getJumps(selected.r, selected.c);
             const jump = jumps.find(j => j.r === r && j.c === c);
-            const globals = getGlobalJumps(myColor);
 
             if (jump) {
-                // Peek if there's another jump possible
                 const nextJumps = simulateJump(selected.r, selected.c, r, c, jump);
                 if (nextJumps.length > 0) {
                     socket.emit('makeMove', { roomId, moveData: {r1:selected.r, c1:selected.c, r2:r, c2:c, jump, nextTurn: myColor}});
                     mustContinue = {r, c}; 
+                    selected = mustContinue;
+                    calculateValidMoves(); // Keep highlight alive for multi-jump
                 } else {
                     socket.emit('makeMove', { roomId, moveData: {r1:selected.r, c1:selected.c, r2:r, c2:c, jump, nextTurn: myColor===1?2:1}});
                     mustContinue = null;
+                    selected = null;
                 }
-            } else if (!mustContinue && globals.length === 0 && isValidNormal(selected.r, selected.c, r, c)) {
+            } else {
                 socket.emit('makeMove', { roomId, moveData: {r1:selected.r, c1:selected.c, r2:r, c2:c, jump:null, nextTurn: myColor===1?2:1}});
+                selected = null;
             }
+            validDestinations = [];
         }
 
-        // Logic check: temporary board mutation to see if more jumps exist
+        // Fixed the mutation bug
         function simulateJump(r1, c1, r2, c2, jump) {
-            const p = {...board[r1][c1]};
+            const originalP = {...board[r1][c1]};
             const victim = {...board[jump.cap.r][jump.cap.c]};
-            board[r2][c2] = p; board[r1][c1] = {type:0}; board[jump.cap.r][jump.cap.c] = {type:0};
-            // Russian rule: promote during jump makes it a king immediately
+            
+            board[r2][c2] = {...originalP}; 
+            board[r1][c1] = {type:0, king:false}; 
+            board[jump.cap.r][jump.cap.c] = {type:0, king:false};
+            
             if (!board[r2][c2].king && (board[r2][c2].type===1?r2===0:r2===7)) board[r2][c2].king = true;
+            
             const next = getJumps(r2, c2);
-            // Revert
-            board[r1][c1] = p; board[r2][c2] = {type:0}; board[jump.cap.r][jump.cap.c] = victim;
+            
+            // Revert securely
+            board[r1][c1] = originalP; 
+            board[r2][c2] = {type:0, king:false}; 
+            board[jump.cap.r][jump.cap.c] = victim;
             return next;
         }
 
@@ -209,10 +260,50 @@
             return res;
         }
 
+        function checkWin() {
+            if (turn === 0) return; // Game hasn't started fully
+            
+            let hasMoves = false;
+            let piecesLeft = false;
+
+            for (let r=0; r<8; r++) {
+                for (let c=0; c<8; c++) {
+                    if (board[r][c].type === turn) {
+                        piecesLeft = true;
+                        if (getJumps(r, c).length > 0) hasMoves = true;
+                        for (let nr=0; nr<8; nr++) {
+                            for (let nc=0; nc<8; nc++) {
+                                if (board[nr][nc].type === 0 && isValidNormal(r, c, nr, nc)) hasMoves = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!hasMoves || !piecesLeft) {
+                gameOver = true;
+                const winner = turn === 1 ? 'BLACK' : 'WHITE';
+                document.getElementById('status').innerText = `${winner} WINS!`;
+                document.getElementById('status').style.color = "gold";
+                document.getElementById('alert-box').innerText = "Game Over - No valid moves left.";
+                render();
+            }
+        }
+
         function updateUI() {
+            if (gameOver) return;
             const s = document.getElementById('status');
+            const alertBox = document.getElementById('alert-box');
+            
             s.innerText = turn === myColor ? "YOUR TURN" : "OPPONENT'S TURN";
             s.style.color = turn === myColor ? "#2ecc71" : "#e74c3c";
+
+            if (turn === myColor && getGlobalJumps(myColor).length > 0) {
+                alertBox.innerText = "⚠ Mandatory Jump Available!";
+            } else {
+                alertBox.innerText = "";
+            }
+
             render();
         }
     </script>
